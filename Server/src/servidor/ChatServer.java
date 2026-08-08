@@ -4,6 +4,8 @@ import chat.protocolo.Command;
 import chat.protocolo.CommandParser;
 import chat.protocolo.CommandType;
 
+import java.util.concurrent.locks.ReentrantLock;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -34,14 +36,20 @@ public class ChatServer {
 
     private final Map<String, ClientConnection> users;
 
-    public ChatServer(int port) {
+    private final ReentrantLock lock;
+
+    public ChatServer(int port) 
+    {
 
         this.port = port;
 
         clients = new HashMap<>();
 
         users = new HashMap<>();
-    }
+
+    
+        lock = new ReentrantLock();
+        }
 
 
     public void start() {
@@ -142,7 +150,16 @@ public class ChatServer {
 
         key.attach(client);
 
-        clients.put(channel, client);
+        lock.lock();
+
+        try {
+
+                clients.put(channel, client);
+
+        } finally {
+
+                lock.unlock();
+        }
 
         System.out.println();
         System.out.println(
@@ -274,33 +291,36 @@ public class ChatServer {
     }
 
     private void processLogin(
-            ClientConnection client,
-            String username) {
+        ClientConnection client,
+        String username) {
 
+    if (client.getUsername() != null) {
 
-        if (client.getUsername() != null) {
+        send(
+                client,
+                "ERROR|Ya has iniciado sesión"
+        );
 
-            send(
-                    client,
-                    "ERROR|Ya has iniciado sesión"
-            );
+        activarEscritura(client);
 
-            activarEscritura(client);
+        return;
+    }
 
-            return;
-        }
+    if (!validarUsername(username)) {
 
-        if (!validarUsername(username)) {
+        send(
+                client,
+                "ERROR|Nombre de usuario inválido"
+        );
 
-            send(
-                    client,
-                    "ERROR|Nombre de usuario inválido"
-            );
+        activarEscritura(client);
 
-            activarEscritura(client);
+        return;
+    }
 
-            return;
-        }
+    lock.lock();
+
+    try {
 
         if (users.containsKey(username)) {
 
@@ -323,21 +343,25 @@ public class ChatServer {
                         + username
         );
 
-        send(
-                client,
-                "WELCOME|" + username
-        );
+    } finally {
 
-
-        broadcast(
-                "JOIN|" + username,
-                client
-        );
-
-        broadcastUserList();
-
-        activarEscritura(client);
+        lock.unlock();
     }
+
+    send(
+            client,
+            "WELCOME|" + username
+    );
+
+    broadcast(
+            "JOIN|" + username,
+            client
+    );
+
+    broadcastUserList();
+
+    activarEscritura(client);
+}
 
 
     private void processGroup(
@@ -388,77 +412,88 @@ public class ChatServer {
     }
 
     private void processPrivate(
-            ClientConnection sender,
-            String destino,
-            String mensaje) {
+        ClientConnection sender,
+        String destino,
+        String mensaje) {
 
-        if (!isLogged(sender)) {
-
-            send(
-                    sender,
-                    "ERROR|Debes iniciar sesión primero"
-            );
-
-            activarEscritura(sender);
-
-            return;
-        }
-
-        ClientConnection receptor =
-                users.get(destino);
-
-        if (receptor == null) {
-
-            send(
-                    sender,
-                    "ERROR|El usuario no está conectado"
-            );
-
-            activarEscritura(sender);
-
-            return;
-        }
-
-        if (receptor == sender) {
-
-            send(
-                    sender,
-                    "ERROR|No puedes enviarte un mensaje a ti mismo"
-            );
-
-            activarEscritura(sender);
-
-            return;
-        }
-
-        String mensajeServidor =
-                "PRIVATE|"
-                        + sender.getUsername()
-                        + "|"
-                        + mensaje;
-
-        send(
-                receptor,
-                mensajeServidor
-        );
+    if (!isLogged(sender)) {
 
         send(
                 sender,
-                mensajeServidor
+                "ERROR|Debes iniciar sesión primero"
         );
 
-        activarEscritura(receptor);
         activarEscritura(sender);
 
-        System.out.println(
-                "[PRIVADO] "
-                        + sender.getUsername()
-                        + " -> "
-                        + destino
-                        + ": "
-                        + mensaje
-        );
+        return;
     }
+
+    ClientConnection receptor;
+
+    
+    lock.lock();
+
+    try {
+
+        receptor = users.get(destino);
+
+    } finally {
+
+        lock.unlock();
+    }
+
+    if (receptor == null) {
+
+        send(
+                sender,
+                "ERROR|El usuario no está conectado"
+        );
+
+        activarEscritura(sender);
+
+        return;
+    }
+
+    if (receptor == sender) {
+
+        send(
+                sender,
+                "ERROR|No puedes enviarte un mensaje a ti mismo"
+        );
+
+        activarEscritura(sender);
+
+        return;
+    }
+
+    String mensajeServidor =
+            "PRIVATE|"
+                    + sender.getUsername()
+                    + "|"
+                    + mensaje;
+
+    send(
+            receptor,
+            mensajeServidor
+    );
+
+    send(
+            sender,
+            mensajeServidor
+    );
+
+    activarEscritura(receptor);
+    activarEscritura(sender);
+
+    System.out.println(
+            "[PRIVADO] "
+                    + sender.getUsername()
+                    + " -> "
+                    + destino
+                    + ": "
+                    + mensaje
+    );
+}
 
     private void processList(
             ClientConnection client) {
@@ -500,49 +535,79 @@ public class ChatServer {
     }
 
 
-    private void broadcast(
-            String mensaje,
-            ClientConnection excluir) {
+        private List<ClientConnection> getClientsSnapshot() {
 
-        for (ClientConnection client : clients.values()) {
+                lock.lock();
 
-            if (client == excluir) {
-                continue;
-            }
+                try 
+                {
 
-            if (!isLogged(client)) {
-                continue;
-            }
+                        return new ArrayList<>(
+                                clients.values()
+                        );
 
-            send(client, mensaje);
+                } finally 
+                {
 
-            activarEscritura(client);
+                        lock.unlock();
+                }
         }
+
+    private void broadcast(
+        String mensaje,
+        ClientConnection excluir) {
+
+    List<ClientConnection> clientes =
+            getClientsSnapshot();
+
+    for (ClientConnection client : clientes) {
+
+        if (client == excluir) {
+            continue;
+        }
+
+        if (!isLogged(client)) {
+            continue;
+        }
+
+        send(
+                client,
+                mensaje
+        );
+
+        activarEscritura(client);
     }
+}
 
     private void broadcastUserList() {
 
-        StringBuilder lista =
-                new StringBuilder("USERS|");
+    List<String> nombres;
 
-        boolean primero = true;
+    lock.lock();
 
-        for (String username : users.keySet()) {
+    try {
 
-            if (!primero) {
-                lista.append(",");
-            }
+        nombres =
+                new ArrayList<>(
+                        users.keySet()
+                );
 
-            lista.append(username);
+    } finally {
 
-            primero = false;
-        }
-
-        broadcast(
-                lista.toString(),
-                null
-        );
+        lock.unlock();
     }
+
+    String lista =
+            String.join(
+                    ",",
+                    nombres
+            );
+
+    broadcast(
+            "USERS|" + lista,
+            null
+    );
+}
 
     private void send(
             ClientConnection client,
@@ -586,40 +651,54 @@ public class ChatServer {
     }
 
     private void disconnectClient(
-            SelectionKey key) {
+        SelectionKey key) {
 
         if (key == null) {
-            return;
+                return;
         }
 
         ClientConnection client =
                 (ClientConnection) key.attachment();
 
         if (client == null) {
-            return;
+                return;
         }
 
         String username =
                 client.getUsername();
 
-        if (username != null) {
 
-            users.remove(username);
+        lock.lock();
 
-            System.out.println(
-                    "[DESCONECTADO] "
-                            + username
-            );
+        try {
 
-            broadcast(
-                    "LEFT|" + username,
-                    client
-            );
+                if (username != null) {
+
+                users.remove(username);
+
+                System.out.println(
+                        "[DESCONECTADO] "
+                                + username
+                );
+                }
+
+                clients.remove(
+                        client.getChannel()
+                );
+
+        } finally {
+
+                lock.unlock();
         }
 
-        clients.remove(
-                client.getChannel()
-        );
+
+        if (username != null) {
+
+                broadcast(
+                        "LEFT|" + username,
+                        client
+                );
+        }
 
         key.cancel();
 
@@ -627,13 +706,30 @@ public class ChatServer {
 
         System.out.println(
                 "[INFO] Clientes conectados: "
-                        + clients.size()
+                        + getClientCount()
         );
 
         broadcastUserList();
-    }
+        }
 
-    private SelectionKey findKey(
+        private int getClientCount() {
+
+                lock.lock();
+
+                try 
+                {
+
+                        return clients.size();
+
+                }
+                finally 
+                {
+
+                        lock.unlock();
+                }
+        }
+
+        private SelectionKey findKey(
             ClientConnection client) {
 
         return client
